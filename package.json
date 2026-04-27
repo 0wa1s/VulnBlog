@@ -1,0 +1,20 @@
+{
+  "name": "vulnblog",
+  "version": "4.0.0",
+  "description": "Intentionally vulnerable blog — security research and CTF training",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js":     "^1.14.3",
+    "@grpc/proto-loader": "^0.8.0",
+	"@grpc/reflection": "^1.0.4",
+    "better-sqlite3":    "^9.4.3",
+    "express":           "^4.18.3",
+    "nunjucks":          "^3.2.4",
+    "protobufjs":        "^7.3.0"
+  },
+  "keywords": ["security", "ctf", "vulnerable", "protobuf", "grpc", "owasp"],
+  "license": "MIT"
+}

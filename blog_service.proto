@@ -1,0 +1,526 @@
+syntax = "proto3";
+package blog;
+
+// ================================================================
+//  VulnBlog — Complete API Reference  (blog_service.proto)
+//  Version 3.0
+//
+//  Transport:  HTTP/1.1  POST /api/proto
+//              Content-Type: application/x-protobuf
+//
+//  All operations funnel through a single ApiRequest/ApiResponse
+//  envelope.  The service block below documents every operation
+//  as a named RPC so you can use it as a reference in Postman,
+//  BloomRPC, or any proto-aware tool.
+//
+//  Authentication:
+//    1. Call Login or Register to receive a session_token.
+//    2. Include that token in the session_token field of every
+//       subsequent request message that requires it.
+//    3. Call Logout to invalidate the token server-side.
+//
+//  Seeded test accounts:
+//    username: admin   password: s3cr3tAdm1n!   role: ADMIN
+//    username: alice   password: alice123        role: AUTHOR
+//    username: bob     password: bob456          role: GUEST
+//
+//  Role values:
+//    GUEST  = 0  — can read published posts, filter comments
+//    AUTHOR = 1  — can also create posts, leave comments
+//    ADMIN  = 2  — can see all posts including drafts
+// ================================================================
+
+// ── Enumerations ─────────────────────────────────────────────────────────────
+
+enum Role {
+  GUEST  = 0;
+  AUTHOR = 1;
+  ADMIN  = 2;
+}
+
+// ── Core data types ───────────────────────────────────────────────────────────
+
+// Author represents a registered user.
+message Author {
+  int32  id       = 1;  // Auto-assigned by server
+  string username = 2;  // Unique. Example: "alice"
+  string email    = 3;  // Example: "alice@vulnblog.local"
+  Role   role     = 4;  // 0=GUEST 1=AUTHOR 2=ADMIN
+  string bio      = 5;  // Short profile bio
+}
+
+// Post represents a blog post.
+message Post {
+  int32  id          = 1;  // Auto-assigned
+  string title       = 2;  // Example: "Understanding Protobuf"
+  string body        = 3;  // HTML content. Example: "<p>Hello world</p>"
+  string category    = 4;  // Example: "Technology"
+  string template    = 5;  // Nunjucks template string. Example: "Hello {{ title }}"
+  int32  author_id   = 6;  // Set automatically from session on CreatePost
+  string tags        = 7;  // Comma-separated. Example: "protobuf,api,security"
+  bool   published   = 8;  // false = draft (only visible to ADMIN or own author)
+  string author_name = 9;  // Read-only. Populated by server from users table
+  string created     = 10; // Read-only. ISO datetime string
+}
+
+// Comment represents a comment on a post.
+message Comment {
+  int32  id      = 1;  // Auto-assigned
+  int32  post_id = 2;  // ID of the post this comment belongs to
+  string author  = 3;  // Read-only. Set from session_token by server
+  string content = 4;  // HTML content. Example: "<p>Great post!</p>"
+  string filter  = 5;  // JS expression used by FilterComments. Example: "this.author === 'alice'"
+  string created = 6;  // Read-only. ISO datetime string
+}
+
+// ── Request messages ──────────────────────────────────────────────────────────
+
+// LoginRequest — authenticate and receive a session token.
+// No session_token required.
+// SQL injection surface: username, password
+//
+// Example values:
+//   username: "alice"        password: "alice123"      → normal login
+//   username: "admin"        password: "s3cr3tAdm1n!"  → admin login
+//   username: "admin'--"     password: "x"             → SQLi bypass
+//   username: "' OR '1'='1'--"  password: "x"          → OR bypass
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+// RegisterRequest — create a new account and receive a session token.
+// No session_token required.
+// New accounts are created with role=GUEST.
+//
+// Example values:
+//   username: "newuser"   password: "mypassword"   email: "new@example.com"
+message RegisterRequest {
+  string username = 1;
+  string password = 2;
+  string email    = 3;
+}
+
+// LogoutRequest — invalidate a session token.
+// Deletes the session row from the database.
+//
+// Example values:
+//   session_token: "<token from Login>"
+message LogoutRequest {
+  string session_token = 1;
+}
+
+// PublishPostRequest — make a draft post publicly visible.
+// Requires session_token belonging to the post author or an Admin.
+message PublishPostRequest {
+  string session_token = 1;
+  int32  post_id       = 2;
+}
+
+// DeletePostRequest — permanently delete a post and all its comments.
+// Requires session_token belonging to the post author or an Admin.
+message DeletePostRequest {
+  string session_token = 1;
+  int32  post_id       = 2;
+}
+
+// ListPostsRequest — list blog posts.
+// No auth required for published posts.
+// Pass session_token to auto-elevate based on your role.
+// Pass min_role=2 to bypass published filter (BAC vulnerability).
+//
+// Example values (normal):
+//   min_role: GUEST   category: ""           session_token: ""          → published posts
+//   min_role: GUEST   category: "Technology" session_token: ""          → filter by category
+//   min_role: GUEST   category: ""           session_token: "<token>"   → auto-elevate by role
+message ListPostsRequest {
+  Role   min_role      = 1;  // Minimum role to display. GUEST=published only, ADMIN=all
+  string category      = 2;  // Optional category filter. Empty string = all categories
+  string session_token = 3;  // Optional. Auto-elevates based on actual role
+}
+
+// GetPostRequest — get a single post with its comments.
+// Published posts are public. Drafts require author or ADMIN session.
+//
+// Example values:
+//   post_id: 1   session_token: ""          → get published post #1
+//   post_id: 5   session_token: "<token>"   → get draft post (must be author or admin)
+message GetPostRequest {
+  int32  post_id       = 1;  // ID of the post to retrieve
+  string session_token = 2;  // Optional. Required for draft posts
+}
+
+// SearchRequest — full-text search across post titles and bodies.
+// The query field is parameterised (safe). The tags field is raw SQLi surface.
+//
+// Example values (normal):
+//   query: "protobuf"   tags: ""         min_role: GUEST   → search by keyword
+//   query: ""           tags: "security" min_role: GUEST   → filter by tag
+//   query: "owasp"      tags: "security" min_role: GUEST   → combined search
+//
+// Example values (testing):
+//   query: ""   tags: "x'"              → single quote: confirms raw interpolation
+//   query: ""   tags: "x' OR '1'='1"   → tautology: returns all posts
+message SearchRequest {
+  string query         = 1;  // Keyword search against title + body (parameterised)
+  string tags          = 2;  // Tag filter (raw SQL interpolation)
+  Role   min_role      = 3;  // GUEST=published only, ADMIN=all posts
+  string session_token = 4;  // Optional
+}
+
+// CreatePostRequest — create a new blog post.
+// Requires session_token resolving to role >= AUTHOR.
+// The post.author_id is ignored — server uses the session user's ID.
+//
+// Example values:
+//   session_token: "<alice's token>"
+//   post.title:    "My First Post"
+//   post.body:     "<p>Hello <strong>world</strong></p>"
+//   post.category: "Technology"
+//   post.template: "Welcome to {{ title }}!"
+//   post.tags:     "hello,world,intro"
+//   post.published: true
+message CreatePostRequest {
+  string session_token = 1;  // Required. Must resolve to AUTHOR or ADMIN role
+  Post   post          = 2;  // Post data. author_id and author_name are server-set
+}
+
+// CreateCommentRequest — post a comment on a blog post.
+// Requires session_token. The comment.author is set from the session (not client).
+//
+// Example values:
+//   session_token:       "<any valid token>"
+//   comment.post_id:     1
+//   comment.content:     "<p>Great post, thanks!</p>"
+//   comment.filter:      ""    (leave empty when just posting a comment)
+message CreateCommentRequest {
+  string  session_token = 1;  // Required. Any authenticated user can comment
+  Comment comment       = 2;  // comment.author is overwritten by server from session
+}
+
+// FilterCommentsRequest — retrieve comments for a post, optionally filtered.
+// No auth required. The filter field is a JavaScript expression evaluated
+// server-side with `this` bound to each comment object (mirrors MongoDB $where).
+//
+// Available fields in expression:  this.id, this.post_id, this.author,
+//                                  this.content, this.filter, this.created
+//
+// Example values (normal use):
+//   post_id: 1   filter: ""                              → all comments on post 1
+//   post_id: 1   filter: "this.author === 'alice'"       → alice's comments only
+//   post_id: 1   filter: "this.content.length > 60"      → long comments only
+//   post_id: 1   filter: "this.author !== 'admin'"       → exclude admin comments
+//   post_id: 2   filter: "this.content.includes('fast')" → comments containing 'fast'
+//   post_id: 1   filter: "this.id > 3"                   → comments with id > 3
+//   post_id: 1   filter: "this.author === 'bob' && this.post_id === 1"  → compound
+message FilterCommentsRequest {
+  int32  post_id       = 1;  // ID of the post whose comments to filter
+  string filter        = 2;  // JS expression. Empty = return all comments
+  string session_token = 3;  // Optional
+}
+
+// UpdateProfileRequest — update bio, email for the authenticated user.
+// Requires session_token. Non-admins can only update their own profile.
+// The role field in author is written to the DB without server-side validation.
+// The UI shows this field as disabled — but the Protobuf field is fully writable.
+//
+// Example values (normal):
+//   session_token:    "<alice's token>"
+//   author.id:        2
+//   author.username:  "alice"
+//   author.email:     "alice@vulnblog.local"
+//   author.bio:       "Updated bio text"
+//   author.role:      1   ← AUTHOR (keep current role)
+//
+// Note: to test BAC, set author.role = 2 while logged in as a GUEST.
+// The server validates your session but does not validate the role value.
+message UpdateProfileRequest {
+  string session_token = 1;  // Required. Must match author.id (unless ADMIN)
+  Author author        = 2;  // Fields to update. role is written as-is to the DB
+}
+
+// ── Response messages ─────────────────────────────────────────────────────────
+
+// LoginResponse — returned by Login and Register operations.
+message LoginResponse {
+  bool   success       = 1;  // true if login succeeded
+  string session_token = 2;  // Opaque 64-char hex string. Include in subsequent requests
+  Author user          = 3;  // Full user record including current role
+}
+
+// SearchResponse — returned by ListPosts and Search operations.
+message SearchResponse {
+  repeated Post posts = 1;  // Matching posts
+  int32         total = 2;  // Total number of matching posts
+  string        debug = 3;  // The raw SQL query that was executed (always returned)
+}
+
+// ── Envelope — all requests and responses use these two messages ───────────────
+
+// ApiRequest — wrap any operation in this envelope and POST to /api/proto.
+// Set exactly one field in the oneof payload block.
+message ApiRequest {
+  oneof payload {
+    // ── Public (no auth required) ────────────────────────────
+    LoginRequest          login          = 1;  // Authenticate → returns session_token
+    RegisterRequest       register       = 6;  // Create account → returns session_token
+    ListPostsRequest      listPosts      = 7;  // List posts (published by default)
+    GetPostRequest        getPost        = 8;  // Get single post + its comments
+    SearchRequest         search         = 4;  // Full-text + tag search
+    FilterCommentsRequest filterComments = 9;  // Filter comments with JS expression
+
+    // ── Authenticated (session_token required) ───────────────
+    CreatePostRequest     post           = 2;  // Create blog post (AUTHOR+ role)
+    CreateCommentRequest  comment        = 3;  // Add comment to a post (any auth user)
+    UpdateProfileRequest  profile        = 5;  // Update bio/email/role
+    LogoutRequest         logout         = 10; // Invalidate session token
+    PublishPostRequest    publishPost    = 11; // Publish a draft post
+    DeletePostRequest     deletePost     = 12; // Delete a post permanently
+  }
+}
+
+// ApiResponse — every operation returns this envelope.
+// Check success first. On error, message contains the reason (may include SQL errors).
+message ApiResponse {
+  bool   success = 1;  // true = operation succeeded
+  string message = 2;  // Human-readable status / error message (may contain SQL errors)
+
+  // One of these is populated depending on the operation:
+  oneof result {
+    LoginResponse  login_result   = 3;  // Populated by: Login, Register, UpdateProfile
+    Post           post_result    = 4;  // Populated by: CreatePost
+    SearchResponse search_result  = 5;  // Populated by: ListPosts, Search
+    Comment        comment_result = 6;  // Populated by: CreateComment
+  }
+
+  repeated Comment comment_list = 7;  // Populated by: GetPost, FilterComments
+}
+
+// ── Service definition ────────────────────────────────────────────────────────
+//
+// VulnBlogService documents every operation as a named RPC.
+// Note: the server uses HTTP/1.1 with a single /api/proto endpoint,
+// not gRPC. This service block is for documentation and tooling only.
+//
+// To use with a proto-aware tool (Postman, BloomRPC, evans):
+//   1. Import this .proto file
+//   2. Select the method you want to call
+//   3. Fill in the request fields
+//   4. The tool encodes it to binary and sends to POST /api/proto
+
+service VulnBlogService {
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+
+  // Login authenticates a user and returns a session token.
+  // The token must be included in the session_token field of all
+  // subsequent authenticated requests.
+  //
+  // On success: response.login_result.session_token is set
+  // On failure: response.success=false, response.message="Invalid username or password"
+  //
+  // Try:
+  //   username="alice"  password="alice123"     → AUTHOR token
+  //   username="admin"  password="s3cr3tAdm1n!" → ADMIN token
+  rpc Login (LoginRequest) returns (ApiResponse);
+
+  // Register creates a new GUEST account and returns a session token immediately.
+  // The new user can log in right away using the returned token.
+  //
+  // On success: response.login_result contains token + user (role=GUEST)
+  // On failure: response.message="Username already taken"
+  rpc Register (RegisterRequest) returns (ApiResponse);
+
+  // Logout invalidates the session token by deleting it from the sessions table.
+  // After calling this, the token is no longer accepted by the server.
+  //
+  // On success: response.success=true, response.message="Logged out"
+  rpc Logout (LogoutRequest) returns (ApiResponse);
+
+  // ── Posts ─────────────────────────────────────────────────────────────────
+
+  // ListPosts returns all published blog posts, newest first.
+  // Pass a session_token to auto-elevate based on your role.
+  // ADMIN-role sessions also see unpublished drafts.
+  //
+  // On success: response.search_result.posts contains the list
+  //             response.search_result.debug contains the SQL that ran
+  //             response.search_result.total contains the count
+  //
+  // Common usage:
+  //   min_role=GUEST  category=""            → all published posts
+  //   min_role=GUEST  category="Technology"  → posts in Technology category
+  //   min_role=GUEST  category="Security"    → posts in Security category
+  rpc ListPosts (ListPostsRequest) returns (ApiResponse);
+
+  // GetPost returns a single post by ID along with all its comments.
+  // Published posts are accessible to anyone.
+  // Draft posts require a session_token belonging to the author or an ADMIN.
+  //
+  // On success: response.post_result = the post
+  //             response.comment_list = all comments on that post
+  // On failure: response.message="Post not found" or "not published"
+  //
+  // Common usage:
+  //   post_id=1  session_token=""          → get published post #1
+  //   post_id=2  session_token=""          → get published post #2
+  //   post_id=5  session_token="<token>"   → get draft post (auth required)
+  rpc GetPost (GetPostRequest) returns (ApiResponse);
+
+  // Search performs a full-text search across post titles and bodies.
+  // The query field is parameterised. The tags field is raw SQL.
+  // Response always includes the debug SQL string.
+  //
+  // On success: response.search_result.posts = matching posts
+  //             response.search_result.debug = SQL that executed
+  //
+  // Common usage:
+  //   query="protobuf"  tags=""         → search by keyword
+  //   query=""          tags="security" → filter posts by tag
+  //   query="owasp"     tags="web"      → combined keyword + tag filter
+  rpc Search (SearchRequest) returns (ApiResponse);
+
+  // CreatePost creates a new blog post.
+  // Requires a session_token with AUTHOR or ADMIN role.
+  // The author_id is set automatically from the session — client value is ignored.
+  // The template field is rendered server-side via Nunjucks before storing.
+  //
+  // On success: response.post_result = the created post (with server-assigned id)
+  //             response.message includes the SSTI render output and SSI directive
+  // On failure: response.message="Authentication required" or "need Author role"
+  //
+  // Required fields:  session_token, post.title, post.body
+  // Optional fields:  post.category (default "General"), post.tags, post.template,
+  //                   post.published (default false)
+  rpc CreatePost (CreatePostRequest) returns (ApiResponse);
+
+  // ── Comments ──────────────────────────────────────────────────────────────
+
+  // CreateComment adds a comment to a post.
+  // Requires any valid session_token.
+  // The comment.author is set from the session — client value is ignored.
+  //
+  // On success: response.comment_result = the saved comment
+  // On failure: response.message="Authentication required"
+  //
+  // Required fields:  session_token, comment.post_id, comment.content
+  // Optional fields:  comment.filter (stored for use by FilterComments)
+  rpc CreateComment (CreateCommentRequest) returns (ApiResponse);
+
+  // FilterComments retrieves comments for a post and filters them using
+  // a JavaScript expression evaluated server-side with `this` = comment row.
+  // This mirrors MongoDB's $where operator.
+  //
+  // On success: response.comment_list = matching comments
+  //             response.message = "N of M comments matched <expr>"
+  // On error:   response.success=false, response.message="Filter error: <details>"
+  //
+  // Expression reference — `this` fields:
+  //   this.id        int    comment ID
+  //   this.post_id   int    parent post ID
+  //   this.author    string username of commenter
+  //   this.content   string comment body (HTML)
+  //   this.filter    string stored filter expression (if any)
+  //   this.created   string ISO datetime
+  //
+  // Common usage:
+  //   post_id=1  filter=""                              → all comments (no filter)
+  //   post_id=1  filter="this.author === 'alice'"       → alice's comments only
+  //   post_id=1  filter="this.content.length > 60"      → long comments only
+  //   post_id=1  filter="this.author !== 'admin'"       → exclude admin
+  //   post_id=2  filter="this.content.includes('fast')" → substring match
+  //   post_id=1  filter="this.id > 2"                   → comments with id > 2
+  //   post_id=1  filter="this.author==='bob' && this.id > 1"  → compound
+  rpc FilterComments (FilterCommentsRequest) returns (ApiResponse);
+
+  // ── Profile ───────────────────────────────────────────────────────────────
+
+  // UpdateProfile updates a user's bio, email, and role.
+  // Requires a valid session_token. Non-admins may only update their own profile.
+  // The server validates the session but writes author.role to the DB without
+  // checking whether the requested role is <= the user's current role.
+  //
+  // On success: response.login_result contains a fresh session_token + updated user
+  //             response.message confirms the update and new role
+  // On failure: response.message="Authentication required" or
+  //             "You can only edit your own profile"
+  //
+  // Required fields:  session_token, author.id, author.username
+  // Optional fields:  author.email, author.bio, author.role
+  //
+  // Normal usage:
+  //   session_token="<your token>"
+  //   author.id=<your id>   author.username="alice"
+  //   author.email="new@email.com"   author.bio="Updated bio"
+  //   author.role=1   ← keep current AUTHOR role
+  rpc UpdateProfile (UpdateProfileRequest) returns (ApiResponse);
+
+  // PublishPost makes a draft post publicly visible.
+  // Requires session_token with author ownership or Admin role.
+  rpc PublishPost (PublishPostRequest) returns (ApiResponse);
+
+  // DeletePost permanently deletes a post and all its comments.
+  // Requires session_token with author ownership or Admin role.
+  rpc DeletePost (DeletePostRequest) returns (ApiResponse);
+
+}
+
+// ── Quick reference ───────────────────────────────────────────────────────────
+//
+//  WORKFLOW: Login → copy session_token → use in all subsequent calls
+//
+//  Step 1 — Login
+//    LoginRequest { username: "alice", password: "alice123" }
+//    → ApiResponse.login_result.session_token  (save this)
+//    → ApiResponse.login_result.user.role      (1 = AUTHOR)
+//
+//  Step 2 — List all published posts
+//    ListPostsRequest { min_role: GUEST, category: "", session_token: "<token>" }
+//    → ApiResponse.search_result.posts[]
+//    → ApiResponse.search_result.debug  (shows the SQL)
+//
+//  Step 3 — Read a specific post and its comments
+//    GetPostRequest { post_id: 1, session_token: "<token>" }
+//    → ApiResponse.post_result        (the post)
+//    → ApiResponse.comment_list[]     (comments on this post)
+//
+//  Step 4 — Search posts by keyword or tag
+//    SearchRequest { query: "protobuf", tags: "", min_role: GUEST }
+//    SearchRequest { query: "",         tags: "security", min_role: GUEST }
+//
+//  Step 5 — Filter comments on a post
+//    FilterCommentsRequest { post_id: 1, filter: "this.author === 'alice'" }
+//    FilterCommentsRequest { post_id: 1, filter: "this.content.length > 40" }
+//    FilterCommentsRequest { post_id: 1, filter: "" }  ← no filter, return all
+//
+//  Step 6 — Create a post (AUTHOR or ADMIN role required)
+//    CreatePostRequest {
+//      session_token: "<alice's token>",
+//      post: {
+//        title:     "My Post",
+//        body:      "<p>Hello world</p>",
+//        category:  "Technology",
+//        tags:      "hello,world",
+//        template:  "Welcome to {{ title }}!",
+//        published: true
+//      }
+//    }
+//    → ApiResponse.post_result.id  (use to navigate to the new post)
+//
+//  Step 7 — Comment on a post
+//    CreateCommentRequest {
+//      session_token: "<any valid token>",
+//      comment: { post_id: 1, content: "<p>Great post!</p>" }
+//    }
+//    → ApiResponse.comment_result  (the saved comment)
+//
+//  Step 8 — Update profile
+//    UpdateProfileRequest {
+//      session_token: "<your token>",
+//      author: { id: 2, username: "alice", email: "new@email.com", bio: "New bio", role: 1 }
+//    }
+//    → ApiResponse.login_result  (fresh token + updated user)
+//
+//  Step 9 — Logout
+//    LogoutRequest { session_token: "<your token>" }
+//    → ApiResponse.success = true

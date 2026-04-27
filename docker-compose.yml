@@ -1,0 +1,25 @@
+version: "3.9"
+
+# VulnBlog — docker compose up -d --build
+# HTTP:  http://localhost:3000
+# gRPC:  localhost:50051  (plaintext)
+# DB:    persisted in vulnblog_data volume
+
+services:
+  vulnblog:
+    build: .
+    image: vulnblog:latest
+    container_name: vulnblog
+    restart: unless-stopped
+    ports:
+      - "3000:3000"    # HTTP / browser SPA / binary Protobuf
+      - "50051:50051"  # gRPC (plaintext)
+      - "50052:50052" # gRPCS (TLS)
+    volumes:
+      - vulnblog_data:/data
+    environment:
+      - NODE_ENV=production
+
+volumes:
+  vulnblog_data:
+    driver: local

@@ -1,0 +1,171 @@
+syntax = "proto3";
+package blog;
+
+// ================================================================
+//  VulnBlog — Protobuf API Schema v3.0
+//  Endpoint: POST /api/proto  (Content-Type: application/x-protobuf)
+//
+//  Authentication: every mutating / privileged request carries
+//  session_token (opaque string returned by Login/Register).
+//  The server validates it against the sessions table on every call.
+//
+//  Vulnerabilities:
+//    [1] SQL Injection       — Login, Register, Search, Post, Comment, Profile
+//    [2] Stored XSS          — Post.body, Comment.content (raw HTML reflection)
+//    [3] SSI Injection       — Post.category (echoed into SSI directive header)
+//    [4] SSTI                — Post.template (Nunjucks renderString, no sandbox)
+//    [5] NoSQL / eval Inj.   — FilterCommentsRequest.filter (fn.call(row))
+//    [6] Broken Access Ctrl  — Author.role written to DB, session role not re-checked
+// ================================================================
+
+enum Role {
+  GUEST  = 0;
+  AUTHOR = 1;
+  ADMIN  = 2;
+}
+
+// ── Core data types ──────────────────────────────────────────────────────────
+
+message Author {
+  int32  id       = 1;
+  string username = 2;
+  string email    = 3;
+  Role   role     = 4;
+  string bio      = 5;
+}
+
+message Post {
+  int32  id          = 1;
+  string title       = 2;
+  string body        = 3;   // [XSS]  Stored and reflected as raw HTML
+  string category    = 4;   // [SSI]  Echoed into SSI directive
+  string template    = 5;   // [SSTI] Passed to nunjucks renderString
+  int32  author_id   = 6;
+  string tags        = 7;   // [SQLi] Concatenated into SQL
+  bool   published   = 8;
+  string author_name = 9;   // Server-populated
+  string created     = 10;
+}
+
+message Comment {
+  int32  id      = 1;
+  int32  post_id = 2;
+  string author  = 3;
+  string content = 4;  // [XSS]   Stored and reflected as raw HTML
+  string filter  = 5;  // [NoSQL] eval()'d server-side
+  string created = 6;
+}
+
+// ── Request messages ─────────────────────────────────────────────────────────
+
+message LoginRequest {
+  string username = 1;  // [SQLi]
+  string password = 2;  // [SQLi]
+}
+
+message RegisterRequest {
+  string username = 1;  // [SQLi]
+  string password = 2;
+  string email    = 3;  // [SQLi]
+}
+
+// Listing / reading — public, no token required
+message ListPostsRequest {
+  Role   min_role      = 1;  // [BAC] ADMIN(2) bypasses published filter
+  string category      = 2;  // [SQLi]
+  string session_token = 3;  // Optional — elevates visible posts if valid admin session
+}
+
+message GetPostRequest {
+  int32  post_id      = 1;  // [SQLi]
+  string session_token = 2; // Optional — allows viewing own drafts
+}
+
+message SearchRequest {
+  string query         = 1;  // [SQLi]
+  string tags          = 2;  // [SQLi]
+  Role   min_role      = 3;  // [BAC]
+  string session_token = 4;
+}
+
+// Authenticated — token required
+message CreatePostRequest {
+  string session_token = 1;  // Required — must resolve to role >= AUTHOR
+  Post   post          = 2;  // [XSS][SQLi][SSTI][SSI] in post fields
+}
+
+message CreateCommentRequest {
+  string session_token = 1;  // Required
+  Comment comment      = 2;  // [XSS][SQLi] in comment fields
+}
+
+message FilterCommentsRequest {
+  int32  post_id       = 1;
+  string filter        = 2;  // [NoSQL] fn.call(row) — mirrors MongoDB $where
+  string session_token = 3;  // Optional
+}
+
+message UpdateProfileRequest {
+  string session_token = 1;  // Required — identifies user to update
+  Author author        = 2;  // [BAC] author.role written directly to DB, no server re-check
+                              // [SQLi] all fields interpolated raw
+}
+
+// ── Responses ────────────────────────────────────────────────────────────────
+
+message LoginResponse {
+  bool   success       = 1;
+  string session_token = 2;  // Opaque token — send on all future authenticated requests
+  Author user          = 3;
+}
+
+message SearchResponse {
+  repeated Post posts = 1;
+  int32         total = 2;
+  string        debug = 3;   // Raw SQL echoed back
+}
+
+// ── Envelope ─────────────────────────────────────────────────────────────────
+
+message LogoutRequest {
+  string session_token = 1;
+}
+
+message PublishPostRequest {
+  string session_token = 1;
+  int32  post_id       = 2;
+}
+
+message DeletePostRequest {
+  string session_token = 1;
+  int32  post_id       = 2;
+}
+
+message ApiRequest {
+  oneof payload {
+    LoginRequest          login          = 1;
+    CreatePostRequest     post           = 2;
+    CreateCommentRequest  comment        = 3;
+    SearchRequest         search         = 4;
+    UpdateProfileRequest  profile        = 5;
+    RegisterRequest       register       = 6;
+    ListPostsRequest      listPosts      = 7;
+    GetPostRequest        getPost        = 8;
+    FilterCommentsRequest filterComments = 9;
+    LogoutRequest         logout         = 10;
+    PublishPostRequest    publishPost    = 11;
+    DeletePostRequest     deletePost     = 12;
+  }
+}
+
+message ApiResponse {
+  bool   success = 1;
+  string message = 2;
+  oneof result {
+    LoginResponse  login_result   = 3;
+    Post           post_result    = 4;
+    SearchResponse search_result  = 5;
+    Comment        comment_result = 6;
+  }
+  repeated Comment comment_list = 7;
+}
